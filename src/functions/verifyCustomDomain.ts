@@ -6,23 +6,37 @@ export async function verifyCustomDomain(
 ): Promise<HttpResponseInit> {
     try {
         if (request.method !== "POST") {
-            return { status: 405, jsonBody: { error: "Method not allowed. Use POST." } };
+            return {
+                status: 405,
+                jsonBody: { error: "Method not allowed. Use POST." }
+            };
         }
 
+        // Parse request body
         const body = await request.json().catch(() => null);
+
         // @ts-ignore
         if (!body || !body.domain || !body.projectId) {
-            return { status: 400, jsonBody: { error: "Missing required fields: domain, projectId" } };
+            return {
+                status: 400,
+                jsonBody: { error: "Missing required fields: domain, projectId" }
+            };
         }
+
         // @ts-ignore
         const { domain, projectId } = body;
         const token = process.env.VERCEL_TOKEN;
 
         if (!token) {
-            return { status: 500, jsonBody: { error: "VERCEL_TOKEN not found." } };
+            return {
+                status: 500,
+                jsonBody: { error: "VERCEL_TOKEN not found." }
+            };
         }
 
-        // STEP 1 — TXT Verification
+        // ---------------------------------------------------------
+        // STEP 1 — TXT Verification (ownership)
+        // ---------------------------------------------------------
         const verifyUrl = `https://api.vercel.com/v9/projects/${projectId}/domains/${domain}/verify`;
 
         const txtRes = await fetch(verifyUrl, {
@@ -35,13 +49,14 @@ export async function verifyCustomDomain(
 
         const txtData = await txtRes.json();
 
+        // If missing TXT record → return required TXT
         if (!txtRes.ok && txtData?.error?.code === "missing_txt_record") {
             return {
                 status: 400,
                 jsonBody: {
                     success: false,
                     type: "missing-txt-record",
-                    message: "Domain ownership cannot be verified yet.",
+                    message: "Domain ownership not verified. Add the required TXT record.",
                     requiredRecords: [
                         {
                             type: "TXT",
@@ -50,12 +65,16 @@ export async function verifyCustomDomain(
                             ttl: 60
                         }
                     ],
-                    raw: txtData
+                    raw: {
+                        txtVerification: txtData
+                    }
                 }
             };
         }
 
-        // STEP 2 — FULL DNS CONFIG (A, CNAME, TXT)
+        // ---------------------------------------------------------
+        // STEP 2 — Full DNS config (A, CNAME, TXT)
+        // ---------------------------------------------------------
         const configUrl = `https://api.vercel.com/v6/domains/${domain}/config`;
 
         const configRes = await fetch(configUrl, {
@@ -64,10 +83,11 @@ export async function verifyCustomDomain(
 
         const configData = await configRes.json();
 
-        const requiredRecords: any[] = [];
+        // BUILD FINAL DNS OBJECTS
         const currentRecords: any[] = [];
+        const requiredRecords: any[] = [];
 
-        // CURRENT A VALUES
+        // CURRENT A records (if any)
         if (Array.isArray(configData.aValues)) {
             configData.aValues.forEach((ip: string) => {
                 currentRecords.push({
@@ -78,18 +98,18 @@ export async function verifyCustomDomain(
             });
         }
 
-        // CURRENT CNAME values
+        // CURRENT CNAMEs
         if (Array.isArray(configData.cnames)) {
-            configData.cnames.forEach((c: string) => {
+            configData.cnames.forEach((cname: string) => {
                 currentRecords.push({
                     type: "CNAME",
                     host: "@",
-                    value: c
+                    value: cname
                 });
             });
         }
 
-        // EXPECTED / REQUIRED RECORDS → Recommended A
+        // EXPECTED A records
         if (Array.isArray(configData.recommendedIPv4)) {
             configData.recommendedIPv4.forEach((r: any) => {
                 r.value.forEach((ip: string) => {
@@ -103,19 +123,24 @@ export async function verifyCustomDomain(
             });
         }
 
-        // EXPECTED CNAME RECORD
+        // EXPECTED CNAME (ONLY for subdomains)
         if (Array.isArray(configData.recommendedCNAME)) {
             configData.recommendedCNAME.forEach((r: any) => {
-                requiredRecords.push({
-                    type: "CNAME",
-                    host: "@",
-                    value: r.value,
-                    ttl: 60
-                });
+                const label = domain.split(".")[0]; // e.g. app.myapp.com → "app"
+
+                // Skip CNAME for root apex domain
+                if (label === "www" || domain.split(".").length > 2) {
+                    requiredRecords.push({
+                        type: "CNAME",
+                        host: label,
+                        value: r.value,
+                        ttl: 60
+                    });
+                }
             });
         }
 
-        // EXPECTED TXT CHALLENGES
+        // EXPECTED TXT verification records (if any still required)
         if (Array.isArray(configData.acceptedChallenges)) {
             configData.acceptedChallenges.forEach((c: any) => {
                 requiredRecords.push({
@@ -127,6 +152,7 @@ export async function verifyCustomDomain(
             });
         }
 
+        // FINAL RESULT
         return {
             status: 200,
             jsonBody: {
@@ -134,7 +160,7 @@ export async function verifyCustomDomain(
                 domain,
                 projectId,
 
-                txtVerified: txtRes.ok,
+                ownershipVerified: txtRes.ok,
                 dnsMisconfigured: configData.misconfigured === true,
                 fullyVerified: txtRes.ok && configData.misconfigured === false,
 
@@ -142,14 +168,17 @@ export async function verifyCustomDomain(
                 requiredRecords,
 
                 raw: {
-                    txt: txtData,
-                    config: configData
+                    txtVerification: txtData,
+                    configResponse: configData
                 }
             }
         };
 
     } catch (err: any) {
-        return { status: 500, jsonBody: { error: "Internal error", message: err.message } };
+        return {
+            status: 500,
+            jsonBody: { error: "Internal server error", message: err.message }
+        };
     }
 }
 
