@@ -1,5 +1,52 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 
+// Helper function to sanitize and validate deploymentUrl
+function sanitizeAndValidateDeploymentUrl(raw: string): string {
+    if (!raw || typeof raw !== "string") {
+        throw new Error("deploymentUrl must be a string.");
+    }
+
+    let url = raw.trim().toLowerCase();
+
+    // Remove protocol
+    url = url.replace(/^https?:\/\//, "");
+
+    // Remove leading "www."
+    url = url.replace(/^www\./, "");
+
+    // Remove trailing slash
+    url = url.replace(/\/$/, "");
+
+    // Reject if any slash exists (hostname must not contain /)
+    if (url.includes("/")) {
+        throw new Error("deploymentUrl must not contain any path segments.");
+    }
+
+    // Allowed: letters, numbers, hyphens, dots
+    if (!/^[a-z0-9.-]+$/.test(url)) {
+        throw new Error("deploymentUrl contains invalid characters.");
+    }
+
+    // Must end with .vercel.app
+    if (!url.endsWith(".vercel.app")) {
+        throw new Error("deploymentUrl must end with '.vercel.app'.");
+    }
+
+    // Deployment slug must match:
+    // something-like-this-123abc.vercel.app
+    const deploymentPattern = /^[a-z0-9-]+\.[a-z0-9-]+\.vercel\.app$/;
+    if (!deploymentPattern.test(url)) {
+        throw new Error("deploymentUrl does not match a valid Vercel deployment hostname.");
+    }
+
+    return url;
+}
+
+// Helper function to validate domain format (basic check)
+function isValidHostname(domain: string): boolean {
+    return /^[a-z0-9.-]+$/i.test(domain) && !domain.includes("..") && !domain.startsWith(".");
+}
+
 export async function attachCustomDomain(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
     try {
         context.log(`Incoming request: ${request.method} ${request.url}`);
@@ -37,8 +84,31 @@ export async function attachCustomDomain(request: HttpRequest, context: Invocati
             };
         }
 
+        // Sanitize and validate deploymentUrl
+        let sanitizedDeploymentUrl: string;
+        try {
+            sanitizedDeploymentUrl = sanitizeAndValidateDeploymentUrl(deploymentUrl);
+        } catch (err: any) {
+            return {
+                status: 400,
+                jsonBody: { 
+                    error: "Invalid deploymentUrl",
+                    message: err.message 
+                }
+            };
+        }
+        // Validate domain format
+        if (!isValidHostname(domain)) {
+            return {
+                status: 400,
+                jsonBody: { error: "Invalid domain format.",
+                    message: "Domain must be a valid hostname."
+                }
+            };
+        }
+
         // Step 1: Get the deployment ID from the deployment URL
-        const deploymentRes = await fetch(`https://api.vercel.com/v13/deployments/${deploymentUrl}`, {
+        const deploymentRes = await fetch(`https://api.vercel.com/v13/deployments/${sanitizedDeploymentUrl}`, {
             method: "GET",
             headers: {
                 "Authorization": `Bearer ${token}`,
