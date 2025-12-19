@@ -1,4 +1,5 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
+import { sql } from "../db/neon";
 
 export async function verifyCustomDomain(
   request: HttpRequest,
@@ -10,6 +11,7 @@ export async function verifyCustomDomain(
     }
 
     const body = await request.json().catch(() => null);
+
     // @ts-ignore
     if (!body?.domain || !body?.projectId) {
       return {
@@ -17,19 +19,19 @@ export async function verifyCustomDomain(
         jsonBody: { error: "Missing required fields: domain, projectId" }
       };
     }
-
     // @ts-ignore
     const { domain, projectId } = body;
     const token = process.env.VERCEL_TOKEN;
+
     if (!token) {
       return { status: 500, jsonBody: { error: "Missing VERCEL_TOKEN." } };
     }
 
-    const isSubdomain = domain.split(".").length > 2;
-    const label = isSubdomain ? domain.split(".")[0] : "@";
+    const isApex = domain.split(".").length === 2;
+    const routingType = isApex ? "A" : "CNAME";
 
     // -------------------------------------------------
-    // STEP 1 — Ownership Verification via TXT
+    // STEP 1 — TXT Ownership Verification
     // -------------------------------------------------
     const verifyUrl = `https://api.vercel.com/v9/projects/${projectId}/domains/${domain}/verify`;
 
@@ -49,7 +51,7 @@ export async function verifyCustomDomain(
         jsonBody: {
           success: false,
           type: "missing-txt-record",
-          message: "Ownership not verified. Add this TXT DNS record.",
+          message: "TXT record missing. Ownership not verified.",
           requiredRecords: [
             {
               type: "TXT",
@@ -57,76 +59,43 @@ export async function verifyCustomDomain(
               value: txtData.error.record.value,
               ttl: 60
             }
-          ],
-          raw: { txtVerification: txtData }
+          ]
         }
       };
     }
 
+    const txtVerified = txtRes.ok === true;
+
     // -------------------------------------------------
-    // STEP 2 — Fetch DNS Configuration
+    // STEP 2 — Routing Verification (A / CNAME)
     // -------------------------------------------------
     const configUrl = `https://api.vercel.com/v6/domains/${domain}/config`;
+
     const configRes = await fetch(configUrl, {
       headers: { Authorization: `Bearer ${token}` }
     });
 
     const configData = await configRes.json();
+    const routingVerified = configData?.misconfigured === false;
+    const fullyVerified = txtVerified && routingVerified;
 
     // -------------------------------------------------
-    // STEP 3 — Build CURRENT DNS RECORDS
+    // STEP 3 — UPDATE DATABASE STATE
     // -------------------------------------------------
-    const currentRecords: any[] = [];
-
-    if (Array.isArray(configData.aValues)) {
-      configData.aValues.forEach((ip: string) =>
-        currentRecords.push({ type: "A", host: "@", value: ip })
-      );
-    }
-
-    if (Array.isArray(configData.cnames)) {
-      configData.cnames.forEach((cname: string) =>
-        currentRecords.push({ type: "CNAME", host: label, value: cname })
-      );
-    }
+    await sql`
+      UPDATE custom_domains
+      SET
+        txt_verified = ${txtVerified},
+        routing_type = ${routingType},
+        routing_verified = ${routingVerified},
+        fully_verified = ${fullyVerified},
+        last_config_response = ${JSON.stringify(configData)},
+        updated_at = now()
+      WHERE project_id = ${projectId};
+    `;
 
     // -------------------------------------------------
-    // STEP 4 — Build REQUIRED DNS RECORDS
-    // -------------------------------------------------
-    const requiredRecords: any[] = [];
-
-    // For APEX DOMAIN → require A record
-    if (!isSubdomain) {
-      if (Array.isArray(configData.recommendedIPv4)) {
-        configData.recommendedIPv4.forEach((r: any) => {
-          r.value.forEach((ip: string) => {
-            requiredRecords.push({
-              type: "A",
-              host: "@",
-              value: ip,
-              ttl: 60
-            });
-          });
-        });
-      }
-    }
-
-    // For SUBDOMAIN → require CNAME only
-    if (isSubdomain) {
-      if (Array.isArray(configData.recommendedCNAME)) {
-        configData.recommendedCNAME.forEach((r: any) => {
-          requiredRecords.push({
-            type: "CNAME",
-            host: label,
-            value: r.value,
-            ttl: 60
-          });
-        });
-      }
-    }
-
-    // -------------------------------------------------
-    // STEP 5 — Return Result
+    // STEP 4 — RESPONSE
     // -------------------------------------------------
     return {
       status: 200,
@@ -134,18 +103,16 @@ export async function verifyCustomDomain(
         success: true,
         domain,
         projectId,
-        ownershipVerified: txtRes.ok,
-        dnsMisconfigured: configData.misconfigured === true,
-        fullyVerified: txtRes.ok && configData.misconfigured === false,
-        currentRecords,
-        requiredRecords,
-        raw: {
-          txtVerification: txtData,
-          configResponse: configData
+        status: {
+          txtVerified,
+          routingVerified,
+          fullyVerified
         }
       }
     };
+
   } catch (err: any) {
+    context.log("verifyCustomDomain error", err);
     return {
       status: 500,
       jsonBody: { error: "Internal error", message: err.message }
