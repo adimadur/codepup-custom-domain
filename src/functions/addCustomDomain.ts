@@ -6,6 +6,19 @@ import {
 } from "@azure/functions";
 import { sql } from "../db/neon";
 
+/**
+ * Extracts project name from deployment URL
+ * aditya-portfolio-e7hah9.codepup.app → aditya-portfolio-e7hah9
+ */
+function extractProjectNameFromUrl(url: string): string | null {
+  try {
+    const hostname = url.replace(/^https?:\/\//, "").split("/")[0];
+    return hostname.split(".")[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function addCustomDomain(
   request: HttpRequest,
   context: InvocationContext
@@ -21,6 +34,7 @@ export async function addCustomDomain(
         },
       };
     }
+
     // @ts-ignore
     const { domain, projectId, deploymentUrl } = body;
     const token = process.env.VERCEL_TOKEN;
@@ -32,15 +46,22 @@ export async function addCustomDomain(
       };
     }
 
+    const projectName = extractProjectNameFromUrl(deploymentUrl);
+    if (!projectName) {
+      return {
+        status: 400,
+        jsonBody: { error: "Invalid deploymentUrl" },
+      };
+    }
+
     const isApex = domain.split(".").length === 2;
     const subdomain = isApex ? null : domain.split(".")[0];
-    const routingType = isApex ? "A" : "CNAME";
 
-    // ---------------------------------------
+    // --------------------------------------------------
     // STEP 1 — Add domain to Vercel project
-    // ---------------------------------------
+    // --------------------------------------------------
     const addRes = await fetch(
-      `https://api.vercel.com/v9/projects/${projectId}/domains`,
+      `https://api.vercel.com/v9/projects/${projectName}/domains`,
       {
         method: "POST",
         headers: {
@@ -53,20 +74,9 @@ export async function addCustomDomain(
 
     const addData = await addRes.json();
 
-    // Extract TXT verification (if any)
-    const txtRecords =
-      addData?.verification?.map((v: any) => ({
-        type: "TXT",
-        host: v.domain,
-        value: v.value,
-        ttl: 60,
-      })) ?? [];
-
-    const txtVerified = addData?.verified === true;
-
-    // ---------------------------------------
-    // STEP 2 — Fetch DNS config (A / CNAME)
-    // ---------------------------------------
+    // --------------------------------------------------
+    // STEP 2 — Fetch DNS config ONCE
+    // --------------------------------------------------
     const configRes = await fetch(
       `https://api.vercel.com/v6/domains/${domain}/config`,
       {
@@ -75,92 +85,94 @@ export async function addCustomDomain(
     );
 
     const configData = await configRes.json();
-    const routingVerified = configData?.misconfigured === false;
 
+    // --------------------------------------------------
+    // STEP 3 — Build REQUIRED DNS (single source of truth)
+    // --------------------------------------------------
     const requiredDns = {
-      txt: txtRecords,
+      txt: [] as any[],
       a: [] as any[],
       cname: [] as any[],
     };
 
+    // TXT (ownership)
+    if (Array.isArray(addData?.verification)) {
+      addData.verification.forEach((v: any) => {
+        if (v.type === "TXT") {
+          requiredDns.txt.push({
+            type: "TXT",
+            host: v.domain,
+            value: v.value,
+            ttl: 60,
+          });
+        }
+      });
+    }
+
+    // Apex → A record
     if (isApex && Array.isArray(configData.recommendedIPv4)) {
-      configData.recommendedIPv4.forEach((r: any) =>
-        r.value.forEach((ip: string) =>
+      configData.recommendedIPv4.forEach((r: any) => {
+        r.value.forEach((ip: string) => {
           requiredDns.a.push({
             type: "A",
             host: "@",
             value: ip,
             ttl: 60,
-          })
-        )
-      );
+          });
+        });
+      });
     }
 
+    // Subdomain → CNAME
     if (!isApex && Array.isArray(configData.recommendedCNAME)) {
-      configData.recommendedCNAME.forEach((r: any) =>
+      configData.recommendedCNAME.forEach((r: any) => {
         requiredDns.cname.push({
           type: "CNAME",
           host: subdomain,
           value: r.value,
           ttl: 60,
-        })
-      );
+        });
+      });
     }
 
-    const fullyVerified = txtVerified && routingVerified;
+    const fullyVerified =
+      addData?.verified === true && configData?.misconfigured === false;
 
-    // ---------------------------------------
-    // STEP 3 — UPSERT into Neon
-    // ---------------------------------------
+    // --------------------------------------------------
+    // STEP 4 — UPSERT into Neon (minimal & clean)
+    // --------------------------------------------------
     await sql`
       INSERT INTO custom_domains (
         project_id,
         project_name,
         deployment_url,
         custom_domain,
-
-        txt_verified,
-        routing_type,
-        routing_verified,
+        required_dns,
         fully_verified,
-
-        last_add_response,
-        last_config_response,
-
         created_at,
         updated_at
       )
       VALUES (
         ${projectId},
-        ${projectId},
+        ${projectName},
         ${deploymentUrl},
         ${domain},
-
-        ${txtVerified},
-        ${routingType},
-        ${routingVerified},
+        ${JSON.stringify(requiredDns)},
         ${fullyVerified},
-
-        ${JSON.stringify(addData)},
-        ${JSON.stringify(configData)},
-
         now(),
         now()
       )
       ON CONFLICT (project_id)
       DO UPDATE SET
         custom_domain = EXCLUDED.custom_domain,
-        txt_verified = EXCLUDED.txt_verified,
-        routing_verified = EXCLUDED.routing_verified,
+        required_dns = EXCLUDED.required_dns,
         fully_verified = EXCLUDED.fully_verified,
-        last_add_response = EXCLUDED.last_add_response,
-        last_config_response = EXCLUDED.last_config_response,
         updated_at = now();
     `;
 
-    // ---------------------------------------
+    // --------------------------------------------------
     // RESPONSE
-    // ---------------------------------------
+    // --------------------------------------------------
     return {
       status: 200,
       jsonBody: {
@@ -169,8 +181,8 @@ export async function addCustomDomain(
         projectId,
         requiredDns,
         status: {
-          ownershipVerified: txtVerified,
-          routingVerified,
+          ownershipVerified: addData?.verified === true,
+          routingVerified: configData?.misconfigured === false,
           fullyVerified,
         },
       },
