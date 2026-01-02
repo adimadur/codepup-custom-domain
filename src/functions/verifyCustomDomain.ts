@@ -74,7 +74,7 @@ export async function verifyCustomDomain(
     }
 
     // ----------------------------------------
-    // STEP 3 — Not verified → return error
+    // STEP 3 — Not verified → return error (Frontend will show required DNS config which were stored in DB)
     // ----------------------------------------
     return {
       status: verifyRes.status,

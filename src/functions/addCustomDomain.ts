@@ -12,8 +12,14 @@ import { sql } from "../db/neon";
  */
 function extractProjectNameFromUrl(url: string): string | null {
   try {
+    // Remove the protocol (http:// or https://)
     const hostname = url.replace(/^https?:\/\//, "").split("/")[0];
-    return hostname.split(".")[0] ?? null;
+    
+    // Remove "www." if present
+    const cleanHostname = hostname.replace(/^www\./, "");
+    
+    // Extract the first part of the hostname
+    return cleanHostname.split(".")[0] ?? null;
   } catch {
     return null;
   }

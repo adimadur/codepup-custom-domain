@@ -27,16 +27,16 @@ function sanitizeAndValidateDeploymentUrl(raw: string): string {
         throw new Error("deploymentUrl contains invalid characters.");
     }
 
-    // Must end with .vercel.app
-    if (!url.endsWith(".vercel.app")) {
-        throw new Error("deploymentUrl must end with '.vercel.app'.");
+    // Must end with .vercel.app or .codepup.app
+    if (!url.endsWith(".vercel.app") || !url.endsWith(".codepup.app")) {
+        throw new Error("deploymentUrl must end with '.vercel.app' or '.codepup.app'");
     }
 
     // Deployment slug must match:
-    // something-like-this-123abc.vercel.app
-    const deploymentPattern = /^[a-z0-9-]+\.[a-z0-9-]+\.vercel\.app$/;
+    // something-like-this-123abc.vercel.app or something-like-this-123abc.codepup.app
+    const deploymentPattern = /^[a-z0-9-]+\.[a-z0-9-]+\.(vercel|codepup)\.app$/;
     if (!deploymentPattern.test(url)) {
-        throw new Error("deploymentUrl does not match a valid Vercel deployment hostname.");
+        throw new Error("deploymentUrl does not match a valid Vercel or Codepup deployment hostname.");
     }
 
     return url;
