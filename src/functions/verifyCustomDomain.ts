@@ -1,11 +1,17 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { sql } from "../db/neon";
 
+/**
+ * Verifies if custom domain is fully configured.
+ * Flow: Call Vercel verify endpoint → Update DB if successful
+ * Called by frontend after user configures DNS records.
+ */
 export async function verifyCustomDomain(
   request: HttpRequest,
   context: InvocationContext
 ): Promise<HttpResponseInit> {
   try {
+    // Enforce POST method
     if (request.method !== "POST") {
       return {
         status: 405,
@@ -13,6 +19,7 @@ export async function verifyCustomDomain(
       };
     }
 
+    // Parse and validate required fields
     const body = await request.json().catch(() => null);
     // @ts-ignore
     if (!body?.domain || !body?.projectId || !body?.projectName) {
@@ -25,6 +32,8 @@ export async function verifyCustomDomain(
     }
     // @ts-ignore
     const { domain, projectId, projectName } = body;
+
+    // Verify Vercel API token is available
     const token = process.env.VERCEL_TOKEN;
 
     if (!token) {
@@ -35,7 +44,7 @@ export async function verifyCustomDomain(
     }
 
     // ----------------------------------------
-    // STEP 1 — Ask Vercel: is domain verified?
+    // STEP 1 — Check verification status with Vercel
     // ----------------------------------------
     const verifyRes = await fetch(
       `https://api.vercel.com/v9/projects/${projectName}/domains/${domain}/verify`,
@@ -51,7 +60,7 @@ export async function verifyCustomDomain(
     const verifyData = await verifyRes.json();
 
     // ----------------------------------------
-    // STEP 2 — If verified → update DB
+    // STEP 2 — Update database if verification successful
     // ----------------------------------------
     if (verifyRes.ok && verifyData?.verified === true) {
       await sql`
@@ -74,7 +83,7 @@ export async function verifyCustomDomain(
     }
 
     // ----------------------------------------
-    // STEP 3 — Not verified → return error (Frontend will show required DNS config which were stored in DB)
+    // STEP 3 — Return failure (frontend shows DNS config from DB)
     // ----------------------------------------
     return {
       status: verifyRes.status,

@@ -1,11 +1,17 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { sql } from "../db/neon";
 
+/**
+ * Retrieves custom domain configuration for a project.
+ * Returns DNS requirements only if domain is not yet verified.
+ * Used by frontend to show domain status and DNS instructions.
+ */
 export async function getCustomDomain(
   request: HttpRequest,
   context: InvocationContext
 ): Promise<HttpResponseInit> {
   try {
+    // Enforce GET method
     if (request.method !== "GET") {
       return {
         status: 405,
@@ -13,6 +19,7 @@ export async function getCustomDomain(
       };
     }
 
+    // Extract and validate projectId from query params
     const projectId = request.query.get("projectId");
 
     if (!projectId) {
@@ -23,7 +30,7 @@ export async function getCustomDomain(
     }
 
     // ----------------------------------------
-    // Fetch custom domain record
+    // Query database for custom domain configuration
     // ----------------------------------------
     const result = await sql`
       SELECT
@@ -38,6 +45,7 @@ export async function getCustomDomain(
       LIMIT 1;
     `;
 
+    // Return early if no custom domain configured for this project
     if (result.length === 0) {
       return {
         status: 200,
@@ -47,6 +55,7 @@ export async function getCustomDomain(
 
     const row = result[0];
 
+    // Return DNS requirements only if domain not yet verified
     return {
       status: 200,
       jsonBody: {

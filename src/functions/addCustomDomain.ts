@@ -7,8 +7,14 @@ import {
 import { sql } from "../db/neon";
 
 /**
+ * Adds a custom domain to an already deployed project.
+ * Flow: Add domain to Vercel → Fetch DNS requirements → Store in DB
+ * Returns DNS records that user needs to configure in their domain provider.
+ */
+
+/**
  * Extracts project name from deployment URL
- * aditya-portfolio-e7hah9.codepup.app → aditya-portfolio-e7hah9
+ * Example: aditya-portfolio-e7hah9.codepup.app → aditya-portfolio-e7hah9
  */
 function extractProjectNameFromUrl(url: string): string | null {
   try {
@@ -30,6 +36,7 @@ export async function addCustomDomain(
   context: InvocationContext
 ): Promise<HttpResponseInit> {
   try {
+    // Parse and validate request body
     const body = await request.json().catch(() => null);
     // @ts-ignore
     if (!body?.domain || !body?.projectId || !body?.deploymentUrl) {
@@ -43,6 +50,8 @@ export async function addCustomDomain(
 
     // @ts-ignore
     const { domain, projectId, deploymentUrl } = body;
+
+    // Verify Vercel API token is available
     const token = process.env.VERCEL_TOKEN;
 
     if (!token) {
@@ -52,6 +61,7 @@ export async function addCustomDomain(
       };
     }
 
+    // Extract project name for Vercel API calls
     const projectName = extractProjectNameFromUrl(deploymentUrl);
     if (!projectName) {
       return {
@@ -60,6 +70,7 @@ export async function addCustomDomain(
       };
     }
 
+    // Determine domain type: apex (example.com) vs subdomain (www.example.com)
     const isApex = domain.split(".").length === 2;
     const subdomain = isApex ? null : domain.split(".")[0];
 
@@ -93,7 +104,7 @@ export async function addCustomDomain(
     const configData = await configRes.json();
 
     // --------------------------------------------------
-    // STEP 3 — Build REQUIRED DNS (single source of truth)
+    // STEP 3 — Build required DNS records (stored as single source of truth)
     // --------------------------------------------------
     const requiredDns = {
       txt: [] as any[],
@@ -101,7 +112,7 @@ export async function addCustomDomain(
       cname: [] as any[],
     };
 
-    // TXT (ownership)
+    // TXT record: Proves domain ownership to Vercel
     if (Array.isArray(addData?.verification)) {
       addData.verification.forEach((v: any) => {
         if (v.type === "TXT") {
@@ -115,7 +126,7 @@ export async function addCustomDomain(
       });
     }
 
-    // Apex → A record
+    // A record: Routes apex domain traffic to Vercel's servers
     if (isApex && Array.isArray(configData.recommendedIPv4)) {
       configData.recommendedIPv4.forEach((r: any) => {
         r.value.forEach((ip: string) => {
@@ -129,7 +140,7 @@ export async function addCustomDomain(
       });
     }
 
-    // Subdomain → CNAME
+    // CNAME record: Routes subdomain traffic to Vercel
     if (!isApex && Array.isArray(configData.recommendedCNAME)) {
       configData.recommendedCNAME.forEach((r: any) => {
         requiredDns.cname.push({
@@ -141,11 +152,12 @@ export async function addCustomDomain(
       });
     }
 
+    // Domain is fully verified when both ownership and routing are confirmed
     const fullyVerified =
       addData?.verified === true && configData?.misconfigured === false;
 
     // --------------------------------------------------
-    // STEP 4 — UPSERT into Neon (minimal & clean)
+    // STEP 4 — Save to database (upsert by project_id)
     // --------------------------------------------------
     await sql`
       INSERT INTO custom_domains (
