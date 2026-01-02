@@ -33,8 +33,9 @@ export async function verifyCustomDomain(
     // @ts-ignore
     const { domain, projectId, projectName } = body;
 
-    // Verify Vercel API token is available
+    // Verify Vercel API credentials are available
     const token = process.env.VERCEL_TOKEN;
+    const teamId = process.env.VERCEL_TEAM_ID;
 
     if (!token) {
       return {
@@ -43,11 +44,18 @@ export async function verifyCustomDomain(
       };
     }
 
+    if (!teamId) {
+      return {
+        status: 500,
+        jsonBody: { error: "Missing VERCEL_TEAM_ID." }
+      };
+    }
+
     // ----------------------------------------
-    // STEP 1 — Check verification status with Vercel
+    // STEP 1 — Check verification status with Vercel (with team ID)
     // ----------------------------------------
     const verifyRes = await fetch(
-      `https://api.vercel.com/v9/projects/${projectName}/domains/${domain}/verify`,
+      `https://api.vercel.com/v9/projects/${projectName}/domains/${domain}/verify?teamId=${teamId}`,
       {
         method: "POST",
         headers: {

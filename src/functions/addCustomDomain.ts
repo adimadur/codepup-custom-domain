@@ -51,13 +51,21 @@ export async function addCustomDomain(
     // @ts-ignore
     const { domain, projectId, deploymentUrl } = body;
 
-    // Verify Vercel API token is available
+    // Verify Vercel API credentials are available
     const token = process.env.VERCEL_TOKEN;
+    const teamId = process.env.VERCEL_TEAM_ID;
 
     if (!token) {
       return {
         status: 500,
         jsonBody: { error: "Missing VERCEL_TOKEN" },
+      };
+    }
+
+    if (!teamId) {
+      return {
+        status: 500,
+        jsonBody: { error: "Missing VERCEL_TEAM_ID" },
       };
     }
 
@@ -75,10 +83,10 @@ export async function addCustomDomain(
     const subdomain = isApex ? null : domain.split(".")[0];
 
     // --------------------------------------------------
-    // STEP 1 — Add domain to Vercel project
+    // STEP 1 — Add domain to Vercel project (with team ID)
     // --------------------------------------------------
     const addRes = await fetch(
-      `https://api.vercel.com/v9/projects/${projectName}/domains`,
+      `https://api.vercel.com/v9/projects/${projectName}/domains?teamId=${teamId}`,
       {
         method: "POST",
         headers: {
@@ -92,10 +100,10 @@ export async function addCustomDomain(
     const addData = await addRes.json();
 
     // --------------------------------------------------
-    // STEP 2 — Fetch DNS config ONCE
+    // STEP 2 — Fetch DNS config ONCE (with team ID)
     // --------------------------------------------------
     const configRes = await fetch(
-      `https://api.vercel.com/v6/domains/${domain}/config`,
+      `https://api.vercel.com/v6/domains/${domain}/config?teamId=${teamId}`,
       {
         headers: { Authorization: `Bearer ${token}` },
       }
